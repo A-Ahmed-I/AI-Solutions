@@ -2,12 +2,6 @@
 
 # NeuroVox
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=for-the-badge&logo=python)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?style=for-the-badge&logo=pytorch)
-![ONNX](https://img.shields.io/badge/ONNX-1.23.2-green?style=for-the-badge&logo=onnx)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.128.1-009688?style=for-the-badge&logo=fastapi)
-![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
-
 **AI-Powered Parkinson's Disease Detection from Voice Analysis**
 
 _Advanced deep learning system for early detection of Parkinson's Disease through speech pattern recognition — achieving up to **98.33% accuracy** with less than one minute of training time._
@@ -46,8 +40,8 @@ _Advanced deep learning system for early detection of Parkinson's Disease throug
 
 ### Why NeuroVox?
 
-| Benefit             | Description                                                  |
-| ------------------- | ------------------------------------------------------------ |
+| Benefit          | Description                                                  |
+| ---------------- | ------------------------------------------------------------ |
 | **Non-Invasive** | Simple voice recording — no physical examination required    |
 | **Fast**         | Results in under 1 second at inference; trains in < 1 minute |
 | **Accurate**     | Up to 98.33% accuracy with clinical-grade models             |
@@ -677,5 +671,3 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 ✅ Distribution      ✅ Private use
 ❌ Liability         ❌ Warranty
 ```
-
-
