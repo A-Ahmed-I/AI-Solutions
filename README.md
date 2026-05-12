@@ -303,7 +303,7 @@ Total valid audio files : 1,274
 
 ## Project Structure
 
-````
+```
 AI-Solution/
 ├── README.md                ← Overview of the whole system
 ├── LICENSE
@@ -327,6 +327,8 @@ AI-Solution/
     ├── checkpoint/
     ├── docs/
     └── src/
+```
+
 ---
 
 ## Installation & Usage
@@ -336,7 +338,7 @@ AI-Solution/
 ```bash
 pip install fastapi uvicorn onnxruntime opencv-python \
             scikit-image librosa numpy
-````
+```
 
 ### 2. Place ONNX Checkpoints
 
