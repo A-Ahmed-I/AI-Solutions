@@ -6,13 +6,13 @@ from typing import Generator, Union, List, Dict
 class MetadataBuilder:
     """
     Scans the Parkinson's drawing dataset directory and builds a structured
-    Polars DataFrame of image paths, test types, and class labels.
+    Polars DataFrame of image paths, type tests, and class labels.
 
     Supported test types : ``spiral``, ``wave``
     Labels               : ``HC`` (Healthy Control), ``PD`` (Parkinson's Disease)
     """
 
-    TEST_TYPES: List[str] = ["spiral", "wave"]
+    TYPES_TEST: List[str] = ["spiral", "wave"]
 
     def __init__(self, dataset_root: Union[str, Path]) -> None:
         """
@@ -24,21 +24,21 @@ class MetadataBuilder:
         self.dataset_root = Path(dataset_root)
 
     # ------------------------------------------------------------------
-    def _iter_directory(self, test_type: str) -> Generator[Dict[str, str], None, None]:
+    def _iter_directory(self, type_test: str) -> Generator[Dict[str, str], None, None]:
         """
         Recursively scan one test-type sub-directory and yield metadata dicts.
 
         Parameters
         ----------
-        test_type : str
+        type_test : str
             ``"spiral"`` or ``"wave"``.
 
         Yields
         ------
         dict
-            Keys: ``path``, ``test_type``, ``label``
+            Keys: ``path``, ``type_test``, ``label``
         """
-        search_root = self.dataset_root / test_type
+        search_root = self.dataset_root / type_test
 
         for img_path in search_root.rglob("*.png"):
             folder_name = img_path.parent.name.lower()
@@ -46,11 +46,10 @@ class MetadataBuilder:
 
             yield {
                 "path": str(img_path),
-                "test_type": test_type,
+                "type_test": type_test,
                 "label": label,
             }
 
-    # ------------------------------------------------------------------
     def build(self) -> pl.DataFrame:
         """
         Build a Polars DataFrame for all images across all test types.
@@ -58,11 +57,11 @@ class MetadataBuilder:
         Returns
         -------
         pl.DataFrame
-            Columns: ``path``, ``test_type``, ``label``.
+            Columns: ``path``, ``type_test``, ``label``.
         """
         records: List[Dict[str, str]] = []
 
-        for test_type in self.TEST_TYPES:
-            records.extend(self._iter_directory(test_type))
+        for type_test in self.TYPES_TEST:
+            records.extend(self._iter_directory(type_test))
 
         return pl.DataFrame(records)

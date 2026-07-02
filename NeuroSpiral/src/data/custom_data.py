@@ -7,50 +7,62 @@ from torch.utils.data import Dataset
 
 class ParkinsonDataset(Dataset):
     """
-    PyTorch ``Dataset`` for Parkinson's spiral / wave drawing data.
+    PyTorch Dataset for Parkinson's handwriting classification (spiral / wave).
 
-    Each sample contains:
-    * normalised RGB image tensor  shape ``(3, H, W)``  float32 ∈ [0, 1]
-    * handcrafted feature vector   shape ``(MATH_FEATURE_DIM,)`` float32
-    * binary label                 scalar float32  (1.0 = HC, 0.0 = PD)
+    Each sample consists of:
+        - Image tensor: shape (3, H, W), float32 in range [0, 1]
+        - Handcrafted feature vector: shape (D,), float32
+        - Label: scalar float32
+            * 1.0 → Healthy Control (HC)
+            * 0.0 → Parkinson's Disease (PD)
     """
 
-    def __init__(self, data: pl.DataFrame) -> None:
+    def __init__(self, dataframe: pl.DataFrame) -> None:
         """
         Parameters
         ----------
-        data : pl.DataFrame
-            Must contain columns ``img``, ``math_features``, ``label``.
+        dataframe : pl.DataFrame
+            Must contain columns:
+                - "img": 2D image (H, W) as array-like
+                - "math_features": feature vector
+                - "label": "PD" or "HC"
         """
-        self.data = data
+        self.dataframe = dataframe
 
-    # ------------------------------------------------------------------
     def __len__(self) -> int:
-        return len(self.data)
+        """Return total number of samples."""
+        return len(self.dataframe)
 
-    # ------------------------------------------------------------------
-    def __getitem__(
-        self, index: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
+        Retrieve a single sample.
+
         Parameters
         ----------
-        index : int
+        idx : int
+            Sample index
 
         Returns
         -------
-        img_tensor      : torch.Tensor  shape (3, H, W)  float32
-        feature_tensor  : torch.Tensor  shape (D,)       float32
-        label_tensor    : torch.Tensor  scalar            float32
+        image_tensor : torch.Tensor
+            Shape (3, H, W), float32 normalized to [0, 1]
+
+        feature_tensor : torch.Tensor
+            Shape (D,), float32
+
+        label_tensor : torch.Tensor
+            Scalar tensor (float32)
         """
-        img = np.array(self.data["img"][index], dtype=np.float32) / 255.0
-        label = self.data["label"][index]
-        features = np.array(self.data["math_features"][index], dtype=np.float32)
+        image_array = np.array(self.dataframe["img"][idx], dtype=np.float32) / 255.0
+        feature_array = np.array(self.dataframe["math_features"][idx], dtype=np.float32)
+        label_value = self.dataframe["label"][idx]
 
-        label_value: float = 0.0 if label == "PD" else 1.0
+        label_value = 0.0 if label_value == "PD" else 1.0
 
-        img_tensor = torch.from_numpy(img).permute(2, 0, 1)  # (C, H, W)
-        feature_tensor = torch.from_numpy(features)
+        image_tensor = torch.from_numpy(image_array)  # (H, W)
+        image_tensor = image_tensor.unsqueeze(0).repeat(3, 1, 1)  # (3, H, W)
+
+        feature_tensor = torch.from_numpy(feature_array)  # (D,)
         label_tensor = torch.tensor(label_value, dtype=torch.float32)
 
-        return img_tensor, feature_tensor, label_tensor
+        return image_tensor, feature_tensor, label_tensor
