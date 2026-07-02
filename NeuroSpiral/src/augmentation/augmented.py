@@ -33,7 +33,6 @@ class TrainAugmentor:
         self.data = data
         self.num_augmentations = num_augmentations
 
-    # ------------------------------------------------------------------
     def _build_transform(self) -> A.Compose:
         """
         Build and return the Albumentations augmentation pipeline.
@@ -45,24 +44,20 @@ class TrainAugmentor:
         """
         return A.Compose(
             [
-                A.Rotate(limit=25, p=0.7),
+                A.Rotate(limit=20, p=0.6),
                 A.Affine(
                     scale=(0.95, 1.05),
-                    translate_percent=(0.05, 0.05),
-                    shear=(-5, 5),
-                    p=0.6,
+                    translate_percent=(0.03, 0.03),
+                    shear=(-3, 3),
+                    p=0.5,
                 ),
-                A.GaussNoise(var_limit=(5.0, 20.0), p=0.5),
+                A.GaussNoise(var_limit=(3.0, 10.0), p=0.5),
                 A.RandomBrightnessContrast(
-                    brightness_limit=0.1,
-                    contrast_limit=0.1,
-                    p=0.3,
+                    brightness_limit=0.08, contrast_limit=0.08, p=0.3
                 ),
-                A.HorizontalFlip(p=0.5),
             ]
         )
 
-    # ------------------------------------------------------------------
     def augment(self) -> pl.DataFrame:
         """
         Apply augmentation and return the expanded, shuffled DataFrame.
