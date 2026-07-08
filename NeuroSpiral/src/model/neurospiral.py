@@ -1,81 +1,102 @@
-import timm
 import torch
+import timm
 import torch.nn as nn
-from src.constant.constant import *
 
 
-class ParkinsonClassifier(nn.Module):
+class MultimodalGatedModel(nn.Module):
     """
-    Hybrid classifier that fuses CNN image features with handcrafted HOG+LBP
-    features for Parkinson's disease detection.
+    Multimodal neural network for Parkinson's classification.
 
-    Architecture
-    ------------
-    * **Image branch**  : EfficientNet-B0 (pretrained, no head)
-                          → ``(B, num_features)``
-    * **Math branch**   : 2-layer MLP with BatchNorm + Dropout
-                          ``MATH_FEATURE_DIM → 512 → 128``
-    * **Fusion head**   : 3-layer MLP
-                          ``(num_features + 128) → 512 → 256 → 1``
+    Combines:
+        - Image features (CNN backbone via timm)
+        - Handcrafted numerical features
 
-    The output is a raw logit (apply ``torch.sigmoid`` for probability).
+    Architecture:
+        1. Image encoder (CNN backbone)
+        2. Feature encoder (MLP)
+        3. Gating mechanism (controls feature contribution)
+        4. Fusion head (final classifier)
+
+    Output:
+        - Single logit (use BCEWithLogitsLoss)
     """
 
-    def __init__(self, backbone_name: str = BACKBONE_NAME) -> None:
+    def __init__(
+        self, backbone_name: str = "efficientnet_b0", feature_dim: int = 300
+    ) -> None:
         """
         Parameters
         ----------
         backbone_name : str
-            Any ``timm``-compatible model name.  Default: ``"efficientnet_b0"``.
+            Name of timm model (e.g., efficientnet_b0)
+        feature_dim : int
+            Dimension of handcrafted input features
         """
         super().__init__()
 
-        # Image branch
-        self.backbone = timm.create_model(
-            backbone_name, pretrained=True, num_classes=0, global_pool="avg"
+        self.image_backbone = timm.create_model(
+            model_name=backbone_name, pretrained=True, num_classes=0, global_pool="avg"
         )
-        cnn_out_dim = self.backbone.num_features
+        backbone_output_dim = self.image_backbone.num_features
 
-        # Handcrafted-feature branch
-        self.math_branch = nn.Sequential(
-            nn.Linear(MATH_FEATURE_DIM, MATH_HIDDEN_DIM),
-            nn.ReLU(),
-            nn.BatchNorm1d(MATH_HIDDEN_DIM),
-            nn.Dropout(0.4),
-            nn.Linear(MATH_HIDDEN_DIM, MATH_OUTPUT_DIM),
-            nn.ReLU(),
-            nn.BatchNorm1d(MATH_OUTPUT_DIM),
+        self.feature_norm = nn.LayerNorm(feature_dim)
+
+        self.feature_encoder = nn.Sequential(
+            nn.Linear(feature_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.GELU(),
             nn.Dropout(0.4),
         )
 
-        # Fusion head
-        self.fusion_head = nn.Sequential(
-            nn.Linear(cnn_out_dim + MATH_OUTPUT_DIM, 512),
-            nn.ReLU(),
+        self.gating_network = nn.Sequential(
+            nn.Linear(backbone_output_dim + 128, 128),
+            nn.GELU(),
+            nn.Linear(128, 128),
+            nn.Sigmoid(),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Linear(backbone_output_dim + 128, 256),
+            nn.GELU(),
             nn.Dropout(0.5),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
+            nn.Linear(256, 64),
+            nn.GELU(),
+            nn.Dropout(0.5),
+            nn.Linear(64, 1),
         )
 
-    # ------------------------------------------------------------------
-    def forward(
-        self,
-        image: torch.Tensor,
-        math_features: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, image: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
         """
+        Forward pass.
+
         Parameters
         ----------
-        image         : torch.Tensor  ``(B, 3, H, W)``
-        math_features : torch.Tensor  ``(B, MATH_FEATURE_DIM)``
+        image : torch.Tensor
+            Shape (B, 3, H, W)
+        features : torch.Tensor
+            Shape (B, feature_dim)
 
         Returns
         -------
         torch.Tensor
-            Raw logits of shape ``(B, 1)``.
+            Shape (B, 1) — raw logits
         """
-        img_feat = self.backbone(image)
-        math_feat = self.math_branch(math_features)
-        combined = torch.cat([img_feat, math_feat], dim=1)
-        return self.fusion_head(combined)
+
+        image_features = self.image_backbone(image)  # (B, F_img)
+
+        features = self.feature_norm(features)
+        feature_embedding = self.feature_encoder(features)  # (B, 128)
+
+        combined_features = torch.cat([image_features, feature_embedding], dim=1)
+        gate = self.gating_network(combined_features)  # (B, 128)
+
+        gated_features = feature_embedding * gate
+
+        fused = torch.cat([image_features, gated_features], dim=1)
+        logits = self.classifier(fused)
+
+        return logits
