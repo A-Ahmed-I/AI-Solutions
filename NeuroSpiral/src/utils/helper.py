@@ -1,72 +1,127 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import polars as pl
 from tqdm import tqdm
 import albumentations as A
 import matplotlib.pyplot as plt
 from src.constant.constant import *
 from typing import Dict, Any, Tuple
+from sklearn.decomposition import PCA
 from torch.utils.data import DataLoader, Dataset
-from torchmetrics import BinaryAccuracy, BinaryF1Score
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
+    f1_score,
+    accuracy_score,
     roc_auc_score,
     confusion_matrix,
-    ConfusionMatrixDisplay,
     roc_curve,
+    ConfusionMatrixDisplay,
 )
 
 
-class TTAWrapper:
+def fit_feature_reducers(
+    data: dict,
+) -> Tuple[np.ndarray, VarianceThreshold, StandardScaler, PCA]:
     """
-    Test Time Augmentation for Parkinson detection.
+    Fit feature reduction pipeline on training data only.
 
-    Applies multiple augmentations at inference time and averages
-    the predictions for more stable results.
+    Pipeline steps:
+        1. Variance Threshold (remove low-variance features)
+        2. Standard Scaling
+        3. PCA (retain 95% variance)
+
+    Parameters
+    ----------
+    data : dict
+        Must contain key "math_features" as a column-like structure
+        where each row is a feature vector.
+
+    Returns
+    -------
+    Tuple containing:
+        - X_reduced : np.ndarray
+            Transformed feature matrix after PCA
+        - vt : VarianceThreshold
+            Fitted variance threshold object
+        - scaler : StandardScaler
+            Fitted scaler
+        - pca : PCA
+            Fitted PCA model
     """
+    X = np.stack(data["math_features"].to_numpy())
 
-    def __init__(self):
-        self.transforms = self._build_tta_transforms()
+    variance_selector = VarianceThreshold(threshold=0.01)
+    X_var = variance_selector.fit_transform(X)
 
-    def _build_tta_transforms(self) -> list:
-        """
-        Builds a list of TTA transforms.
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_var)
 
-        No HorizontalFlip — drawing direction matters for spiral/wave.
+    pca = PCA(n_components=0.95, random_state=42)
+    X_reduced = pca.fit_transform(X_scaled)
 
-        Returns:
-            list: List of albumentations transforms.
-        """
-        return [
-            None,  # original — no transform
-            A.Rotate(limit=10, p=1.0),
-            A.Rotate(limit=-10, p=1.0),
-            A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0, p=1.0),
-            A.RandomBrightnessContrast(brightness_limit=-0.15, contrast_limit=0, p=1.0),
-        ]
+    print(f"Features: {X.shape[1]} → {X_reduced.shape[1]}")
 
-    def apply(self, img_np: np.ndarray) -> list:
-        """
-        Applies all TTA transforms to a single image.
+    return X_reduced, variance_selector, scaler, pca
 
-        Args:
-            img_np: np.ndarray (H, W, C) uint8 image.
 
-        Returns:
-            list of torch.Tensor: Each tensor shape (3, H, W), normalized.
-        """
-        results = []
+def transform_features_only(
+    data: dict, variance_selector: VarianceThreshold, scaler: StandardScaler, pca: PCA
+) -> np.ndarray:
+    """
+    Apply pre-fitted feature reduction pipeline (no fitting).
 
-        for transform in self.transforms:
-            if transform is None:
-                aug_img = img_np.copy()
-            else:
-                aug_img = transform(image=img_np)["image"]
+    Used for validation/test data.
 
-            tensor = torch.from_numpy(aug_img.astype(np.float32) / 255.0)
-            tensor = tensor.permute(2, 0, 1)  # (C, H, W)
-            results.append(tensor)
+    Parameters
+    ----------
+    data : dict
+        Must contain "math_features"
+    variance_selector : VarianceThreshold
+        Fitted variance threshold
+    scaler : StandardScaler
+        Fitted scaler
+    pca : PCA
+        Fitted PCA model
 
-        return results  # list of 5 tensors
+    Returns
+    -------
+    np.ndarray
+        Transformed feature matrix
+    """
+    X = np.stack(data["math_features"].to_numpy())
+
+    X_var = variance_selector.transform(X)
+    X_scaled = scaler.transform(X_var)
+    X_reduced = pca.transform(X_scaled)
+
+    return X_reduced
+
+
+def attach_reduced_features_to_df(
+    df: pl.DataFrame, X_reduced: np.ndarray
+) -> pl.DataFrame:
+    """
+    Replace "math_features" column in DataFrame with reduced features.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Input DataFrame
+    X_reduced : np.ndarray
+        Reduced feature matrix (N, D)
+
+    Returns
+    -------
+    pl.DataFrame
+        Updated DataFrame with new feature representation
+    """
+    df = df.with_columns(pl.Series("math_features", X_reduced.tolist()))
+
+    df = df.with_columns(pl.col("math_features").list.to_array(X_reduced.shape[1]))
+
+    return df
 
 
 def build_dataloader(
@@ -90,115 +145,180 @@ def build_dataloader(
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
-def evaluate_on_test_set(
-    model: torch.nn.Module, test_dataloader: DataLoader
-) -> Dict[str, Any]:
-    """
-    Evaluate a trained model on a test dataset using Test-Time Augmentation (TTA).
 
-    This function performs inference on the test dataset, applies multiple
-    augmentations (TTA), averages predictions, and computes evaluation metrics
-    along with visualization plots.
+def find_best_threshold(probabilities: np.ndarray, labels: np.ndarray) -> float:
+    """
+    Find the optimal classification threshold based on F1-score.
+
+    This function evaluates multiple thresholds on validation predictions
+    and selects the one that maximizes the F1-score.
 
     Args:
-        model (torch.nn.Module):
-            The trained PyTorch model. Expected to take (image, math_features)
-            as input and output logits.
-
-        test_dataloader (DataLoader):
-            DataLoader for the test dataset. Each batch should return:
-            (images, math_features, labels)
+        probabilities (np.ndarray): Predicted probabilities (sigmoid outputs).
+        labels (np.ndarray): Ground truth binary labels.
 
     Returns:
-        Dict[str, Any]: Dictionary containing evaluation results:
-            - accuracy (float): Accuracy percentage
-            - f1 (float): F1 score percentage
-            - auc (float): ROC-AUC score percentage
-            - sensitivity (float): Recall for positive class (PD)
-            - specificity (float): Recall for negative class (HC)
-            - precision (float): Precision percentage
-            - cm (np.ndarray): Confusion matrix
-            - results (dict):
-                - true (np.ndarray): Ground truth labels
-                - pred_prob (np.ndarray): Predicted probabilities
-                - pred_label (np.ndarray): Binary predictions
+        float: Best threshold value.
     """
-    tta = TTAWrapper()
-    results = {"true": [], "pred": []}
+    candidate_thresholds = np.arange(0.3, 0.7, 0.01)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    acc_fn = BinaryAccuracy(threshold=0.5).to(device)
-    f1_fn = BinaryF1Score(threshold=0.5).to(device)
+    best_threshold = max(
+        candidate_thresholds,
+        key=lambda t: f1_score(labels, (probabilities > t).astype(int)),
+    )
 
-    model.to(device)
+    return best_threshold
+
+
+def get_validation_predictions(
+    model: torch.nn.Module, val_loader: torch.utils.data.DataLoader, device: str
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Collect model predictions and labels from validation dataset.
+
+    Args:
+        model (torch.nn.Module): Trained model.
+        val_loader (DataLoader): Validation data loader.
+        device (str): Computation device ("cuda" or "cpu").
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]:
+            - Predicted probabilities
+            - Ground truth labels
+    """
     model.eval()
-    acc_fn.reset()
-    f1_fn.reset()
+
+    all_probs: list = []
+    all_labels: list = []
 
     with torch.no_grad():
-        for imgs, math_features, labels in tqdm(
-            test_dataloader, desc="Testing with TTA"
-        ):
-            batch_size = imgs.shape[0]
-            imgs_np = (imgs.permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
-            tta_probs = torch.zeros(batch_size).to(device)
+        for images, math_features, labels in val_loader:
+            images = images.to(device)
+            math_features = math_features.to(device)
 
-            for transform in tta.transforms:
-                aug_imgs = []
+            logits = model(images, math_features)
+            probs = torch.sigmoid(logits).squeeze(1)
+
+            all_probs.extend(probs.cpu().numpy())
+            all_labels.extend(labels.numpy())
+
+    return np.array(all_probs), np.array(all_labels)
+
+def evaluate_with_tta(
+    model: torch.nn.Module,
+    test_loader: torch.utils.data.DataLoader,
+    val_loader: torch.utils.data.DataLoader,
+) -> Dict[str, Any]:
+    """
+    Evaluate model on test dataset using Test-Time Augmentation (TTA).
+
+    Workflow:
+        1. Compute best threshold using validation set.
+        2. Apply TTA on test images.
+        3. Average predictions.
+        4. Compute evaluation metrics.
+
+    Args:
+        model (torch.nn.Module): Trained model.
+        test_loader (DataLoader): Test dataset loader.
+        val_loader (DataLoader): Validation dataset loader.
+
+    Returns:
+        Dict[str, Any]: Evaluation results including:
+            - accuracy
+            - f1 score
+            - auc
+            - sensitivity
+            - specificity
+            - precision
+            - best threshold
+            - confusion matrix
+            - raw predictions
+    """
+
+    tta_transforms = [
+        None,
+        A.Rotate(limit=10, p=1.0),
+        A.Rotate(limit=-10, p=1.0),
+        A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0, p=1.0),
+        A.RandomBrightnessContrast(brightness_limit=-0.15, contrast_limit=0, p=1.0),
+    ]
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+    model.eval()
+
+    val_probs, val_labels = get_validation_predictions(model, val_loader, device)
+    best_threshold = find_best_threshold(val_probs, val_labels)
+
+    print(f"Best threshold (from val): {best_threshold:.2f}")
+
+    results = {"true": [], "pred": []}
+
+    with torch.no_grad():
+        for images, math_features, labels in tqdm(test_loader, desc="Testing with TTA"):
+
+            batch_size = images.shape[0]
+            images_np = (images[:, 0, :, :].cpu().numpy() * 255).astype(np.uint8)
+
+            tta_probabilities = torch.zeros(batch_size).to(device)
+
+            for transform in tta_transforms:
+                augmented_batch = []
+
                 for i in range(batch_size):
-                    img_np = imgs_np[i]
-                    aug_img = (
-                        img_np.copy()
-                        if transform is None
-                        else transform(image=img_np)["image"]
-                    )
-                    tensor = torch.from_numpy(
-                        aug_img.astype(np.float32) / 255.0
-                    ).permute(2, 0, 1)
-                    aug_imgs.append(tensor)
+                    img_np = images_np[i]
 
-                aug_batch = torch.stack(aug_imgs).to(device)
-                math_feat = math_features.to(device)
-                logits = model(aug_batch, math_feat)
+                    if transform is not None:
+                        img_np = transform(image=img_np)["image"]
+
+                    tensor = torch.from_numpy(img_np.astype(np.float32) / 255.0)
+                    tensor = tensor.unsqueeze(0).repeat(3, 1, 1)
+
+                    augmented_batch.append(tensor)
+
+                augmented_batch = torch.stack(augmented_batch).to(device)
+                math_features_device = math_features.to(device)
+
+                logits = model(augmented_batch, math_features_device)
                 probs = torch.sigmoid(logits).squeeze(1)
-                tta_probs += probs
 
-            tta_probs /= len(tta.transforms)
-            labels = labels.to(device).view(-1)
+                tta_probabilities += probs
 
-            acc_fn.update(tta_probs, labels)
-            f1_fn.update(tta_probs, labels)
+            tta_probabilities /= len(tta_transforms)
+
             results["true"].extend(labels.cpu().numpy())
-            results["pred"].extend(tta_probs.cpu().numpy())
-
-    accuracy = acc_fn.compute().item() * 100
-    f1_score = f1_fn.compute().item() * 100
+            results["pred"].extend(tta_probabilities.cpu().numpy())
 
     true_labels = np.array(results["true"])
     pred_probs = np.array(results["pred"])
-    pred_labels = (pred_probs > 0.5).astype(int)
+    pred_labels = (pred_probs > best_threshold).astype(int)
 
+    accuracy = accuracy_score(true_labels, pred_labels) * 100
+    f1 = f1_score(true_labels, pred_labels) * 100
     auc = roc_auc_score(true_labels, pred_probs) * 100
 
     cm = confusion_matrix(true_labels, pred_labels)
     tn, fp, fn, tp = cm.ravel()
 
-    sensitivity = tp / (tp + fn + 1e-6) * 100  # Recall for PD
-    specificity = tn / (tn + fp + 1e-6) * 100  # Recall for HC
-
+    sensitivity = tp / (tp + fn + 1e-6) * 100
+    specificity = tn / (tn + fp + 1e-6) * 100
     precision = tp / (tp + fp + 1e-6) * 100
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["PD", "HC"])
-    disp.plot(ax=axes[0], colorbar=False, cmap="Blues")
+    ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["PD", "HC"]).plot(
+        ax=axes[0], colorbar=False, cmap="Blues"
+    )
+
     axes[0].set_title("Confusion Matrix")
 
     fpr, tpr, _ = roc_curve(true_labels, pred_probs)
     axes[1].plot(fpr, tpr, label=f"AUC = {auc:.2f}%", color="steelblue")
     axes[1].plot([0, 1], [0, 1], "k--", linewidth=0.8)
-    axes[1].set_xlabel("False Positive Rate (1 - Specificity)")
-    axes[1].set_ylabel("True Positive Rate (Sensitivity)")
+
+    axes[1].set_xlabel("False Positive Rate")
+    axes[1].set_ylabel("True Positive Rate")
     axes[1].set_title("ROC Curve")
     axes[1].legend()
     axes[1].grid(alpha=0.3)
@@ -206,21 +326,23 @@ def evaluate_on_test_set(
     plt.tight_layout()
     plt.show()
 
-    results = {
-        "true": true_labels,
-        "pred_prob": np.round(pred_probs, 2),
-        "pred_label": pred_labels,
-    }
-
+    # =========================
+    # Return Results
+    # =========================
     return {
         "accuracy": np.round(accuracy, 2),
-        "f1": np.round(f1_score, 2),
+        "f1": np.round(f1, 2),
         "auc": np.round(auc, 2),
         "sensitivity": np.round(sensitivity, 2),
         "specificity": np.round(specificity, 2),
         "precision": np.round(precision, 2),
+        "best_thresh": np.round(best_threshold, 2),
         "cm": cm,
-        "results": results,
+        "results": {
+            "true": true_labels,
+            "pred_prob": np.round(pred_probs, 2),
+            "pred_label": pred_labels,
+        },
     }
 
 
