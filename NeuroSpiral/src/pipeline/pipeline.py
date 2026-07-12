@@ -218,7 +218,7 @@ class ParkinsonPipeline:
             {
                 "variance_selector": self._vt,
                 "scaler": self._scaler,
-                "pca": _pca,
+                "pca": self._pca,
             },
             REDUCERS_PATH,
         )
