@@ -80,6 +80,6 @@ class NeuroSpiralPredictor:
         )
 
         probability = 1 / (1 + np.exp(-logit))
-        label = "PD" if probability < 0.5 else "HC"
+        label = "PD" if probability < 0.46 else "HC"
 
         return label, round(probability, 4)
